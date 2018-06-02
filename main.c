@@ -6,7 +6,7 @@
 
 #include "vpn.h"
 
-void usage(void) {
+static void usage(void) {
     fprintf(stderr, "Usage: simple-vpn route\n");
     exit(EXIT_FAILURE);
 }

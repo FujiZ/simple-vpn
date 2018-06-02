@@ -3,6 +3,7 @@
 //
 
 #include <errno.h>
+#include <ifaddrs.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,6 +11,7 @@
 
 #include <arpa/inet.h>
 #include <net/ethernet.h>
+#include <net/if.h>
 #include <net/if_arp.h>
 #include <netinet/ip.h>
 
@@ -82,32 +84,26 @@ struct vpn_route_entry *vpn_route_add(char *dest_str, char *netmask_str, char *g
     return vpn_route_alloc(dest, netmask, gateway);
 }
 
-static int vpn_send(void *buffer, size_t nbytes, struct in_addr dest) {
-    // add outer ip header and send this out
-    int sockfd = socket(AF_INET, SOCK_RAW, IPPROTO_IPIP);
-    if (sockfd < 0) {
-        fprintf(stderr, "vpn_send: socket: %s\n", strerror(errno));
-        return -1;
-    }
+/*
+static int local_ip(struct in_addr addr) {
+    struct ifaddrs *if_addrs;
+    int found = 0;
 
-    struct sockaddr_in daddr = {
-            .sin_family = AF_INET,
-            .sin_addr = dest,
-    };
-
-    if (sendto(sockfd, buffer, nbytes, 0,
-               (struct sockaddr *) &daddr, sizeof(daddr)) < 0) {
-        fprintf(stderr, "vpn_send: sendto: %s\n", strerror(errno));
-        close(sockfd);
-        return -1;
+    getifaddrs(&if_addrs);
+    struct ifaddrs *ifap;
+    for (ifap = if_addrs; ifap != NULL; ifap = ifap->ifa_next) {
+        if (ifap->ifa_addr && (ifap->ifa_flags & IFF_UP) && ifap->ifa_addr->sa_family == AF_INET) {
+            struct sockaddr_in *sa = (struct sockaddr_in *) (ifap->ifa_addr);
+            if (addr.s_addr == sa->sin_addr.s_addr) {
+                found = 1;
+                break;
+            }
+        }
     }
-
-    if (close(sockfd) < 0) {
-        fprintf(stderr, "vpn_send: close: %s\n", strerror(errno));
-        return -1;
-    }
-    return 0;
+    freeifaddrs(if_addrs);
+    return found;
 }
+*/
 
 void *dvpnd(void *arg) {
     unsigned char buffer[BUF_LEN];
@@ -128,10 +124,6 @@ void *dvpnd(void *arg) {
     while ((nbytes = recv(sockfd, buffer, BUF_LEN, 0)) > 0) {
         if (nbytes < sizeof(struct ip))
             continue;
-        // assert the dst of received packet is current host,
-        // thus we need not to check the inner ip header,
-        // just send it out.
-        // TODO if this assertion failed, we should check the dst field in iph
         struct ip *iph = (struct ip *) buffer;
         struct ip *iph1 = (struct ip *) ((char *) iph + iph->ip_hl * 4);
         // TODO look into iph1 and check the dst field
@@ -151,6 +143,34 @@ void *dvpnd(void *arg) {
     return NULL;
 }
 
+static int vpn_send(void *buffer, size_t nbytes, struct in_addr dest) {
+    // add outer ip header and send this out
+    int sockfd = socket(AF_INET, SOCK_RAW, IPPROTO_IPIP);
+    if (sockfd < 0) {
+        fprintf(stderr, "vpn_send: socket: %s\n", strerror(errno));
+        return -1;
+    }
+    // TODO maybe we should build ip header on our own
+
+    struct sockaddr_in daddr = {
+            .sin_family = AF_INET,
+            .sin_addr = dest,
+    };
+
+    if (sendto(sockfd, buffer, nbytes, 0,
+               (struct sockaddr *) &daddr, sizeof(daddr)) < 0) {
+        fprintf(stderr, "vpn_send: sendto: %s\n", strerror(errno));
+        close(sockfd);
+        return -1;
+    }
+
+    if (close(sockfd) < 0) {
+        fprintf(stderr, "vpn_send: close: %s\n", strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
 void *svpnd(void *arg) {
     unsigned char buffer[BUF_LEN];
 
@@ -167,7 +187,7 @@ void *svpnd(void *arg) {
     while ((nbytes = recvfrom(sockfd, buffer, BUF_LEN, 0,
                               (struct sockaddr *) &addr, &addr_len)) > 0) {
 
-        // we should only care about incoming uni-cast packet
+        // we only care about incoming uni-cast packet
         if (addr.sll_hatype != ARPHRD_ETHER ||
             addr.sll_pkttype != PACKET_HOST)
             continue;
@@ -175,6 +195,7 @@ void *svpnd(void *arg) {
         if (nbytes < sizeof(struct ip))
             continue;
         struct ip *iph = (struct ip *) buffer;
+        // TODO should we check ip checksum?
         // check if dst is in vpn_route_table
         struct vpn_route_entry *vr_entry = vpn_route_match(iph->ip_dst);
         if (vr_entry)
